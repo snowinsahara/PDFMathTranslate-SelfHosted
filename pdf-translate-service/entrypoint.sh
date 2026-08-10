@@ -29,6 +29,10 @@ trap shutdown TERM INT
 # 后续进程只会读取、不会再写文件，避免跨进程并发初始化竞态。
 # 显式优先环境变量：ConfigManager.get 是“配置文件 > 环境变量 > 默认值”，
 # 若直接调用 get，用户通过环境变量更换 Redis 地址时会被旧配置文件覆盖。
+# 此外串行触发一次翻译缓存数据库初始化（pdf2zh/cache.py 在模块级调用
+# init_db() 建表）：worker 与 flask 进程若同时首次 import pdf2zh，会并发
+# 执行 CREATE TABLE，SQLite 写锁竞争导致 "database is locked" 双双崩溃；
+# 这里先建好库表，后续进程的建表走幂等快速路径（safe=True 只读检查）。
 python - <<'PY'
 import json
 import os
@@ -46,6 +50,11 @@ config_path.write_text(
         ensure_ascii=False,
     )
 )
+
+# import 即触发 cache.py 模块级的 init_db()；显式再调一次以明确语义
+from pdf2zh.cache import init_db
+
+init_db()
 PY
 
 # ---- 1. Redis（Celery broker / result backend）------------------------------
@@ -59,8 +68,36 @@ else
 fi
 
 # ---- 2. Celery worker（执行实际翻译，启动时加载版面分析模型）---------------
-echo "[entrypoint] Starting Celery worker: pdf2zh --celery worker ${WORKER_ARGS:-}"
-pdf2zh --celery worker ${WORKER_ARGS:-} &
+# 用 python 包装 `pdf2zh --celery worker`，以便在启动前设置 Celery 配置：
+#   - result_expires：任务结果（状态 + 翻译后的 PDF 二进制）在 Redis 中的
+#     保留时长，默认 1 小时（3600 秒），可用 PDF2ZH_RESULT_EXPIRES 调整
+#   - 并发：默认由 Celery 按 CPU 核数自动决定（prefork），可用
+#     WORKER_CONCURRENCY 显式指定，或沿用 WORKER_ARGS 透传 celery 参数
+echo "[entrypoint] Starting Celery worker (concurrency=${WORKER_CONCURRENCY:-auto}, result_expires=${PDF2ZH_RESULT_EXPIRES:-3600}s)"
+python - <<'PY' &
+import os
+import shlex
+
+from pdf2zh.backend import celery_app
+from pdf2zh.doclayout import ModelInstance, OnnxModel
+
+celery_app.conf.result_expires = int(os.environ.get("PDF2ZH_RESULT_EXPIRES", "3600"))
+
+# 与官方 `pdf2zh --celery worker` 一致：fork 前先加载版面分析模型
+# （从镜像内置的 babeldoc 缓存读取，不联网；子进程 fork 共享内存）。
+# 官方 CLI 的 main() 里 ModelInstance.value = OnnxModel.load_available()，
+# 直接调 celery_app.start() 会跳过这步，导致 translate_task 以 model=None
+# 崩溃（'NoneType' object has no attribute 'predict'）。
+ModelInstance.value = OnnxModel.load_available()
+
+worker_args = ["worker"]
+if os.environ.get("WORKER_CONCURRENCY"):
+    worker_args += ["--concurrency", os.environ["WORKER_CONCURRENCY"]]
+if os.environ.get("WORKER_ARGS"):
+    worker_args += shlex.split(os.environ["WORKER_ARGS"])
+
+celery_app.start(argv=worker_args)
+PY
 pids+=("$!")
 
 # ---- 3. Flask HTTP API（监听 0.0.0.0:11008）---------------------------------

@@ -6,9 +6,16 @@
 
 该进程只负责接收 /v1/translate 任务提交、查询状态与下载结果，实际的翻译
 （含版面分析模型加载）发生在 Celery worker 进程中，因此这里无需加载模型。
+
+与 worker 进程保持一致，在启动前设置 Celery result_expires（任务结果在
+Redis 中的保留时长，默认 1 小时，可用 PDF2ZH_RESULT_EXPIRES 环境变量调整）。
 """
 
-from pdf2zh.backend import flask_app
+import os
+
+from pdf2zh.backend import celery_app, flask_app
+
+celery_app.conf.result_expires = int(os.environ.get("PDF2ZH_RESULT_EXPIRES", "3600"))
 
 if __name__ == "__main__":
     flask_app.run(host="0.0.0.0", port=11008, threaded=True)
