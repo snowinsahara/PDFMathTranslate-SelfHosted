@@ -1,8 +1,11 @@
 # ============================================================================
 # PDFMathTranslate (pdf2zh) — PDF 翻译 HTTP API 后端服务镜像
 #
-# 版本：1.2.0
+# 版本：1.3.0
 # 变更：
+#   1.3.0  HTTP API 由 Flask 开发服务器（flask_app.run()）升级为 gunicorn
+#         生产模式（默认 2 worker × 8 线程，FLASK_WORKERS / FLASK_THREADS
+#         可调）：并发与超时保护、优雅关闭、结构化访问日志
 #   1.2.0  构建末尾新增内网资源完整性硬验证（字体 / babeldoc 模型 /
 #          tiktoken 缓存缺失即构建失败）+ pdf2zh import 链完整性检查；
 #         修复启动期两个崩溃：worker/flask 并发初始化翻译缓存 SQLite
@@ -21,18 +24,19 @@
 #   2. Celery worker       — `pdf2zh --celery worker` 的等价实现，执行实际
 #                            翻译任务（并发默认 = CPU 核数，可用 WORKER_CONCURRENCY
 #                            控制；任务结果在 Redis 中默认保留 1 小时）
-#   3. Flask HTTP API      — `pdf2zh --flask` 的等价实现，监听 0.0.0.0:11008
+#   3. Flask HTTP API      — `pdf2zh --flask` 的等价实现，监听 0.0.0.0:11008，
+#                            gunicorn 生产模式（workers/threads 可调）
 #
 # 内网部署：镜像已内置全部运行期离线资源（版面分析 ONNX 模型 + rapidocr +
 # 翻译所需字体），容器启动与文档翻译均不访问外网；翻译服务建议配置内网
 # OpenAI 兼容接口（见 README.md）。
 #
 # 构建（注意：构建上下文必须是仓库根目录，构建机需能访问外网下载资源）：
-#   docker build -f pdf-translate-service/Dockerfile -t pdf2zh-api:1.2.0 .
-#   docker tag pdf2zh-api:1.2.0 pdf2zh-api:latest
+#   docker build -f pdf-translate-service/Dockerfile -t pdf2zh-api:1.3.0 .
+#   docker tag pdf2zh-api:1.3.0 pdf2zh-api:latest
 #
 # 运行：
-#   docker run -p 11008:11008 pdf2zh-api:1.2.0
+#   docker run -p 11008:11008 pdf2zh-api:1.3.0
 #
 # 常用接口（详见 docs/APIS.md#api-http）：
 #   POST   /v1/translate                         提交翻译任务
@@ -51,7 +55,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 LABEL org.opencontainers.image.title="pdf2zh-api" \
       org.opencontainers.image.description="PDF translation HTTP API service (PDFMathTranslate)" \
-      org.opencontainers.image.version="1.2.0"
+      org.opencontainers.image.version="1.3.0"
 
 # 系统依赖：
 #   - libgl1 / libglib2.0-0 / libxext6 / libsm6 / libxrender1
@@ -94,6 +98,8 @@ RUN uv pip install --system --no-cache ".[backend]" && \
     # TextTranslateRequest/TextTranslateResponse 类，导致 worker 导入失败，
     # 钉住仍兼容的 3.1.121（上游 pdf2zh v1.9.11 的已知兼容问题）
     uv pip install --system --no-cache "tencentcloud-sdk-python-tmt==3.1.121" && \
+    # HTTP API 生产模式 WSGI 服务器（替换 Flask 开发服务器）
+    uv pip install --system --no-cache gunicorn && \
     babeldoc --version && \
     # 预热 babeldoc 模型资源（含 PDF 版面分析 ONNX 模型 + 表格检测
     # rapidocr 模型 + 内置字体 + tiktoken 编码缓存），

@@ -100,9 +100,23 @@ celery_app.start(argv=worker_args)
 PY
 pids+=("$!")
 
-# ---- 3. Flask HTTP API（监听 0.0.0.0:11008）---------------------------------
-echo "[entrypoint] Starting Flask HTTP API on 0.0.0.0:11008"
-python /opt/serve_flask.py &
+# ---- 3. Flask HTTP API（监听 0.0.0.0:11008，gunicorn 生产模式）-------------
+# 用 gunicorn 替代 Flask 内置开发服务器（flask_app.run()）：生产级 WSGI
+# 服务器，支持多 worker/线程并发、超时保护、优雅关闭与结构化访问日志。
+# 该 API 层负载轻（提交/查询/下载，翻译在 Celery worker 中执行），
+# 默认 2 worker × 8 线程，可用 FLASK_WORKERS / FLASK_THREADS 调整；
+# --timeout 120 避免下载大 PDF 时 worker 被误杀。
+echo "[entrypoint] Starting Flask HTTP API on 0.0.0.0:11008 (gunicorn, workers=${FLASK_WORKERS:-2}, threads=${FLASK_THREADS:-8})"
+gunicorn \
+    --chdir /opt \
+    --bind 0.0.0.0:11008 \
+    --workers "${FLASK_WORKERS:-2}" \
+    --threads "${FLASK_THREADS:-8}" \
+    --timeout 120 \
+    --graceful-timeout 60 \
+    --access-logfile - \
+    --error-logfile - \
+    serve_flask:app &
 pids+=("$!")
 
 # 任一进程退出即终止整个容器，便于编排系统（docker --restart 等）自动重启

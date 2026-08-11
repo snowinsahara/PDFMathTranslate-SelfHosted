@@ -15,6 +15,7 @@
 
 | 版本 | 说明 |
 | --- | --- |
+| `1.3.0` | HTTP API 升级为 **gunicorn 生产模式**（默认 2 worker × 8 线程，`FLASK_WORKERS` / `FLASK_THREADS` 可调），替代 Flask 开发服务器 |
 | `1.2.0` | 构建末尾新增内网资源完整性硬验证（字体 / babeldoc 模型 / tiktoken 缓存缺失即构建失败）；修复启动期并发 SQLite 锁崩溃与 worker 模型未预加载问题 |
 | `1.1.0` | 内网部署支持（运行期外网资源全部内置到镜像）、任务结果过期时间默认 1 小时、worker 并发自动/可调 |
 | `1.0.0`（latest 首个版本） | 首个版本 |
@@ -24,8 +25,8 @@
 > 注意：构建上下文必须是**仓库根目录**；构建机需能访问外网（下载字体、Python 依赖、模型）。
 
 ```bash
-docker build -f pdf-translate-service/Dockerfile -t pdf2zh-api:1.2.0 .
-docker tag pdf2zh-api:1.2.0 pdf2zh-api:latest   # 可选，方便默认引用
+docker build -f pdf-translate-service/Dockerfile -t pdf2zh-api:1.3.0 .
+docker tag pdf2zh-api:1.3.0 pdf2zh-api:latest   # 可选，方便默认引用
 ```
 
 首次构建会安装全部 Python 依赖、下载翻译字体并预热版面分析模型（`babeldoc --warmup`），耗时较长属正常现象。构建末尾会自动验证所有内网资源已内置，**任一项缺失会直接构建失败**（而不是留到内网运行时才暴露）。
@@ -33,7 +34,7 @@ docker tag pdf2zh-api:1.2.0 pdf2zh-api:latest   # 可选，方便默认引用
 ## 运行
 
 ```bash
-docker run -d --name pdf2zh-api -p 11008:11008 pdf2zh-api:1.2.0
+docker run -d --name pdf2zh-api -p 11008:11008 pdf2zh-api:1.3.0
 ```
 
 启动后需等待约 30–45 秒（worker 加载模型），确认就绪：
@@ -56,10 +57,19 @@ docker run -d --name pdf2zh-api -p 11008:11008 \
   -e OPENAI_BASE_URL="http://内网LLM地址:8000/v1" \
   -e OPENAI_API_KEY="内网服务的任意密钥" \
   -e OPENAI_MODEL="你的模型名" \
-  pdf2zh-api:1.2.0
+  pdf2zh-api:1.3.0
 ```
 
 提交任务时 `service` 填 `openai`（见下文接口示例）。
+
+### HTTP API 生产模式（gunicorn）
+
+API 层（任务提交 / 查询 / 下载）由 **gunicorn** 提供，替代 Flask 开发服务器：多进程多线程并发、120s 超时保护、优雅关闭、访问日志输出到容器日志。
+
+- 默认 `2 worker × 8 线程`，可调整：
+  - `-e FLASK_WORKERS=4`（进程数）
+  - `-e FLASK_THREADS=16`（每进程线程数）
+- API 层不加载翻译模型、负载轻，一般无需调整；高并发下载场景可适当加大线程数
 
 ### worker 并发控制
 
@@ -81,7 +91,7 @@ docker run -d --name pdf2zh-api -p 11008:11008 \
 docker run -d --name pdf2zh-api -p 11008:11008 \
   -e CELERY_BROKER=redis://your-redis:6379/0 \
   -e CELERY_RESULT=redis://your-redis:6379/0 \
-  pdf2zh-api:1.2.0
+  pdf2zh-api:1.3.0
 ```
 
 ## 接口示例
