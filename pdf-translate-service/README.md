@@ -15,6 +15,8 @@
 
 | 版本 | 说明 |
 | --- | --- |
+| `1.5.0` | **docx 与翻译同步生成**：worker 在产出 PDF 翻译结果的同时，用 [pdf2docx](https://github.com/ArtifexSoftware/pdf2docx) 直接生成 docx 翻译结果（一 PDF 页一 Word 节，多页结构正确），下载接口直接交付该 docx，不再事后转换 PDF（取代 1.4.0 的 LibreOffice 方案，该方案会把整篇内容挤进一页）；docx 生成失败时接口自动回退交付 PDF |
+| `1.4.0` | **mono/dual 下载接口交付 .docx**：下载时由 LibreOffice 实时转换（`Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document`）；**排版混乱，已被 1.5.0 取代** |
 | `1.3.0` | HTTP API 升级为 **gunicorn 生产模式**（默认 2 worker × 8 线程，`FLASK_WORKERS` / `FLASK_THREADS` 可调），替代 Flask 开发服务器 |
 | `1.2.0` | 构建末尾新增内网资源完整性硬验证（字体 / babeldoc 模型 / tiktoken 缓存缺失即构建失败）；修复启动期并发 SQLite 锁崩溃与 worker 模型未预加载问题 |
 | `1.1.0` | 内网部署支持（运行期外网资源全部内置到镜像）、任务结果过期时间默认 1 小时、worker 并发自动/可调 |
@@ -25,8 +27,8 @@
 > 注意：构建上下文必须是**仓库根目录**；构建机需能访问外网（下载字体、Python 依赖、模型）。
 
 ```bash
-docker build -f pdf-translate-service/Dockerfile -t pdf2zh-api:1.3.0 .
-docker tag pdf2zh-api:1.3.0 pdf2zh-api:latest   # 可选，方便默认引用
+docker build -f pdf-translate-service/Dockerfile -t pdf2zh-api:1.5.0 .
+docker tag pdf2zh-api:1.5.0 pdf2zh-api:latest   # 可选，方便默认引用
 ```
 
 首次构建会安装全部 Python 依赖、下载翻译字体并预热版面分析模型（`babeldoc --warmup`），耗时较长属正常现象。构建末尾会自动验证所有内网资源已内置，**任一项缺失会直接构建失败**（而不是留到内网运行时才暴露）。
@@ -34,7 +36,7 @@ docker tag pdf2zh-api:1.3.0 pdf2zh-api:latest   # 可选，方便默认引用
 ## 运行
 
 ```bash
-docker run -d --name pdf2zh-api -p 11008:11008 pdf2zh-api:1.3.0
+docker run -d --name pdf2zh-api -p 11008:11008 pdf2zh-api:1.5.0
 ```
 
 启动后需等待约 30–45 秒（worker 加载模型），确认就绪：
@@ -57,7 +59,7 @@ docker run -d --name pdf2zh-api -p 11008:11008 \
   -e OPENAI_BASE_URL="http://内网LLM地址:8000/v1" \
   -e OPENAI_API_KEY="内网服务的任意密钥" \
   -e OPENAI_MODEL="你的模型名" \
-  pdf2zh-api:1.3.0
+  pdf2zh-api:1.5.0
 ```
 
 提交任务时 `service` 填 `openai`（见下文接口示例）。
@@ -79,7 +81,7 @@ API 层（任务提交 / 查询 / 下载）由 **gunicorn** 提供，替代 Flas
 
 ### 任务结果过期时间
 
-任务状态与翻译结果（mono/dual PDF）保存在 Redis，**默认保留 1 小时**（TTL 到期自动删除，之后无法再下载）。
+任务状态与翻译结果（mono/dual 的 PDF 与同步生成的 docx 二进制）保存在 Redis，**默认保留 1 小时**（TTL 到期自动删除，之后无法再下载）。
 
 - 环境变量 `PDF2ZH_RESULT_EXPIRES`：单位秒，如 `-e PDF2ZH_RESULT_EXPIRES=86400` 改回 1 天
 
@@ -91,7 +93,7 @@ API 层（任务提交 / 查询 / 下载）由 **gunicorn** 提供，替代 Flas
 docker run -d --name pdf2zh-api -p 11008:11008 \
   -e CELERY_BROKER=redis://your-redis:6379/0 \
   -e CELERY_RESULT=redis://your-redis:6379/0 \
-  pdf2zh-api:1.3.0
+  pdf2zh-api:1.5.0
 ```
 
 ## 接口示例
@@ -107,9 +109,11 @@ curl http://localhost:11008/v1/translate \
 curl http://localhost:11008/v1/translate/d9894125-2f4e-45ea-9d93-1a9068d2045a
 # {"info":{"n":13,"total":506},"state":"PROGRESS"}  或  {"state":"SUCCESS"}
 
-# 3. 下载翻译结果（mono=单语 / dual=双语）
-curl http://localhost:11008/v1/translate/d9894125-2f4e-45ea-9d93-1a9068d2045a/mono --output example-mono.pdf
-curl http://localhost:11008/v1/translate/d9894125-2f4e-45ea-9d93-1a9068d2045a/dual --output example-dual.pdf
+# 3. 下载翻译结果（mono=单语 / dual=双语，均交付 .docx 文件）
+#    —— worker 翻译时已与 PDF 同步生成 docx（一 PDF 页一 Word 节），
+#       下载接口直接返回该 docx；docx 生成失败时回退返回 PDF
+curl http://localhost:11008/v1/translate/d9894125-2f4e-45ea-9d93-1a9068d2045a/mono --output example-mono.docx
+curl http://localhost:11008/v1/translate/d9894125-2f4e-45ea-9d93-1a9068d2045a/dual --output example-dual.docx
 
 # 4. 中断并删除任务
 curl http://localhost:11008/v1/translate/d9894125-2f4e-45ea-9d93-1a9068d2045a -X DELETE

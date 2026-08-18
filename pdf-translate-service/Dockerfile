@@ -1,8 +1,20 @@
 # ============================================================================
 # PDFMathTranslate (pdf2zh) — PDF 翻译 HTTP API 后端服务镜像
 #
-# 版本：1.3.0
+# 版本：1.5.0
 # 变更：
+#   1.5.0  docx 生成改为与翻译同步：worker 在产出 PDF 翻译结果的同时用
+#         pdf2docx（PyMuPDF 提取版式 + python-docx 生成，一 PDF 页一 Word
+#         节）直接生成 docx 翻译结果并随任务结果返回，下载接口直接交付
+#         docx，不再事后用 LibreOffice 转 PDF（1.4.0 方案会把整篇内容
+#         挤进一页）。新增依赖 pdf2docx==0.5.8 + 负数颜色兼容补丁
+#         （pdf2docx 0.5.8 与 pymupdf 1.25 兼容，见 pdf2zh/docx_output.py）；
+#         LibreOffice 仅保留 docx 输入转 PDF（上传 Word 文件翻译）
+#   1.4.0  mono/dual 下载接口交付 .docx 而非 PDF：翻译任务内部仍产出
+#         PDF，下载时由内置 LibreOffice（writer_pdf_import 过滤器）实时
+#         转换为 Word 文档返回；镜像新增 libreoffice-writer，并将翻译
+#         字体注册进系统字体目录，保证 PDF->DOCX 转换时的中文字形
+#         （该方案排版混乱，已被 1.5.0 取代）
 #   1.3.0  HTTP API 由 Flask 开发服务器（flask_app.run()）升级为 gunicorn
 #         生产模式（默认 2 worker × 8 线程，FLASK_WORKERS / FLASK_THREADS
 #         可调）：并发与超时保护、优雅关闭、结构化访问日志
@@ -32,17 +44,17 @@
 # OpenAI 兼容接口（见 README.md）。
 #
 # 构建（注意：构建上下文必须是仓库根目录，构建机需能访问外网下载资源）：
-#   docker build -f pdf-translate-service/Dockerfile -t pdf2zh-api:1.3.0 .
-#   docker tag pdf2zh-api:1.3.0 pdf2zh-api:latest
+#   docker build -f pdf-translate-service/Dockerfile -t pdf2zh-api:1.5.0 .
+#   docker tag pdf2zh-api:1.5.0 pdf2zh-api:latest
 #
 # 运行：
-#   docker run -p 11008:11008 pdf2zh-api:1.3.0
+#   docker run -p 11008:11008 pdf2zh-api:1.5.0
 #
 # 常用接口（详见 docs/APIS.md#api-http）：
 #   POST   /v1/translate                         提交翻译任务
 #   GET    /v1/translate/<task-id>               查询进度
-#   GET    /v1/translate/<task-id>/mono          下载单语 PDF
-#   GET    /v1/translate/<task-id>/dual          下载双语 PDF
+#   GET    /v1/translate/<task-id>/mono          下载单语 DOCX
+#   GET    /v1/translate/<task-id>/dual          下载双语 DOCX
 #   DELETE /v1/translate/<task-id>               中断并删除任务
 # ============================================================================
 
@@ -55,12 +67,14 @@ ENV PYTHONUNBUFFERED=1 \
 
 LABEL org.opencontainers.image.title="pdf2zh-api" \
       org.opencontainers.image.description="PDF translation HTTP API service (PDFMathTranslate)" \
-      org.opencontainers.image.version="1.3.0"
+      org.opencontainers.image.version="1.5.0"
 
 # 系统依赖：
 #   - libgl1 / libglib2.0-0 / libxext6 / libsm6 / libxrender1
 #     onnxruntime、opencv 等原生库运行所需（解决 "libGL.so.1 not found"）
 #   - redis-server         嵌入式 Redis，作为 Celery broker / result backend
+#   - libreoffice-writer   仅用于 docx 输入转 PDF（pdf2zh.converter_docx，
+#                           上传 Word 文件翻译时的前置转换）
 RUN apt-get update && \
     apt-get install --no-install-recommends -y \
         libgl1 \
@@ -69,6 +83,7 @@ RUN apt-get update && \
         libsm6 \
         libxrender1 \
         redis-server \
+        libreoffice-writer \
     && rm -rf /var/lib/apt/lists/*
 
 # 翻译所需字体：pdf2zh 的 download_remote_fonts() 优先使用 /app/<字体名>
@@ -80,6 +95,13 @@ ADD "https://github.com/timelic/source-han-serif/releases/download/main/SourceHa
 ADD "https://github.com/timelic/source-han-serif/releases/download/main/SourceHanSerifTW-Regular.ttf" /app/
 ADD "https://github.com/timelic/source-han-serif/releases/download/main/SourceHanSerifJP-Regular.ttf" /app/
 ADD "https://github.com/timelic/source-han-serif/releases/download/main/SourceHanSerifKR-Regular.ttf" /app/
+
+# 将翻译字体注册进系统字体目录并刷新 fontconfig 缓存：LibreOffice 做
+# docx 输入转 PDF 时按系统字体查找字形，不注册则中文字形可能缺失。
+# fc-cache 随 fontconfig 一起由 libreoffice-writer 依赖安装。
+RUN mkdir -p /usr/share/fonts/truetype/pdf2zh \
+    && cp /app/*.ttf /usr/share/fonts/truetype/pdf2zh/ \
+    && fc-cache -f >/dev/null
 
 # 第一层：仅复制依赖声明并安装核心依赖，pyproject.toml 不变时该层可被缓存复用
 COPY pyproject.toml .
@@ -98,6 +120,12 @@ RUN uv pip install --system --no-cache ".[backend]" && \
     # TextTranslateRequest/TextTranslateResponse 类，导致 worker 导入失败，
     # 钉住仍兼容的 3.1.121（上游 pdf2zh v1.9.11 的已知兼容问题）
     uv pip install --system --no-cache "tencentcloud-sdk-python-tmt==3.1.121" && \
+    # docx 翻译结果生成：pdf2zh/docx_output.py 用 pdf2docx 从翻译产物 PDF
+    # 生成 Word（一 PDF 页一 Word 节）。钉 0.5.8：0.5.9+ 要求
+    # pymupdf>=1.26.7，与本项目为 arm64 wheel 兼容性钉的 pymupdf<1.25.3
+    # 冲突；0.5.8 与 pymupdf 1.25 的负数颜色兼容缺陷由 docx_output.py
+    # 的导入补丁解决（见该模块注释）
+    uv pip install --system --no-cache "pdf2docx==0.5.8" && \
     # HTTP API 生产模式 WSGI 服务器（替换 Flask 开发服务器）
     uv pip install --system --no-cache gunicorn && \
     babeldoc --version && \
@@ -111,6 +139,7 @@ RUN uv pip install --system --no-cache ".[backend]" && \
 # 但内网启动时联网"的假象。
 RUN python - <<'PY'
 import os
+import shutil
 from pathlib import Path
 
 home = Path(os.environ["HOME"])
@@ -153,6 +182,8 @@ if not babeldoc_fonts:
     missing.append(str(cache / "babeldoc" / "fonts") + "/*.ttf")
 if not tiktoken_files:
     missing.append(str(tiktoken_dir) + "/*")
+if not shutil.which("soffice") and not shutil.which("libreoffice"):
+    missing.append("soffice (libreoffice-writer): DOCX->PDF input conversion")
 
 if missing:
     print("OFFLINE ASSETS MISSING:\n  " + "\n  ".join(missing))
@@ -170,6 +201,34 @@ from pdf2zh.backend import celery_app, flask_app  # noqa: E402
 
 init_db()
 print("[verify] pdf2zh import chain OK, translation cache db initialized")
+
+# docx 生成冒烟测试：生成一个 2 页 PDF，走一遍 pdf2zh.docx_output 的
+# 转换链路，断言输出的 docx 含 2 个节（每 PDF 页一 Word 节）。
+# 提前暴露 pdf2docx 版本/兼容性回归（如 0.5.8 的负数颜色解析 bug）
+import io
+import re
+import zipfile
+
+from pdf2zh.docx_output import convert_pdf_to_docx  # noqa: E402
+
+smoke = io.BytesIO()
+import pymupdf  # noqa: E402
+
+smoke_doc = pymupdf.open()
+for i in range(2):
+    page = smoke_doc.new_page()
+    page.insert_text((72, 72), f"smoke test page {i + 1}", fontsize=12)
+smoke_doc.save(smoke)
+smoke_doc.close()
+smoke_docx = convert_pdf_to_docx(smoke.getvalue())
+smoke_xml = zipfile.ZipFile(io.BytesIO(smoke_docx)).read(
+    "word/document.xml"
+).decode("utf-8", "ignore")
+smoke_sections = len(re.findall(r"<w:sectPr", smoke_xml))
+if smoke_sections != 2:
+    print(f"[verify] FAIL: pdf2docx smoke test expected 2 sections, got {smoke_sections}")
+    raise SystemExit(1)
+print(f"[verify] pdf2docx smoke test OK: 2-page PDF -> docx with {smoke_sections} sections")
 PY
 
 # HTTP API 启动器（监听 0.0.0.0）与多进程入口脚本

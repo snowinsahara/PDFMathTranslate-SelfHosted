@@ -178,3 +178,7 @@ cython_debug/
 uv.lock
 *.pdf
 *.docx
+
+# Demo samples: 英文原文 PDF + 翻译后的中文 DOCX（word-dev 分支的翻译结果
+# 样例，按需重新生成，不入版本库）
+/samples/

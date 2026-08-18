@@ -76,14 +76,22 @@ In a more flexible way, you can communicate with the program using HTTP protocol
    - Save monolingual file
 
      ```bash
-     curl http://localhost:11008/v1/translate/d9894125-2f4e-45ea-9d93-1a9068d2045a/mono --output example-mono.pdf
+     curl http://localhost:11008/v1/translate/d9894125-2f4e-45ea-9d93-1a9068d2045a/mono --output example-mono.docx
      ```
 
    - Save bilingual file
 
      ```bash
-     curl http://localhost:11008/v1/translate/d9894125-2f4e-45ea-9d93-1a9068d2045a/dual --output example-dual.pdf
+     curl http://localhost:11008/v1/translate/d9894125-2f4e-45ea-9d93-1a9068d2045a/dual --output example-dual.docx
      ```
+
+     > **Note** — In this fork the translation results are delivered as **.docx** files
+     > instead of PDF: while producing the translated PDF, the worker also generates a
+     > Word document with the same content (pdf2docx, one Word page per PDF page), and
+     > the download endpoints return that docx directly. The response `Content-Type` is
+     > `application/vnd.openxmlformats-officedocument.wordprocessingml.document`;
+     > if docx generation failed for a task, the endpoint falls back to serving the
+     > translated PDF.
 
    - Interrupt if running and delete the task
      ```bash

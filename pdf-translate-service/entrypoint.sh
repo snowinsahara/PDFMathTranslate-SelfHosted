@@ -69,8 +69,9 @@ fi
 
 # ---- 2. Celery worker（执行实际翻译，启动时加载版面分析模型）---------------
 # 用 python 包装 `pdf2zh --celery worker`，以便在启动前设置 Celery 配置：
-#   - result_expires：任务结果（状态 + 翻译后的 PDF 二进制）在 Redis 中的
-#     保留时长，默认 1 小时（3600 秒），可用 PDF2ZH_RESULT_EXPIRES 调整
+#   - result_expires：任务结果（状态 + 翻译后的 PDF 二进制 + 同步生成的
+#     docx 二进制）在 Redis 中的保留时长，默认 1 小时（3600 秒），可用
+#     PDF2ZH_RESULT_EXPIRES 调整
 #   - 并发：默认由 Celery 按 CPU 核数自动决定（prefork），可用
 #     WORKER_CONCURRENCY 显式指定，或沿用 WORKER_ARGS 透传 celery 参数
 echo "[entrypoint] Starting Celery worker (concurrency=${WORKER_CONCURRENCY:-auto}, result_expires=${PDF2ZH_RESULT_EXPIRES:-3600}s)"
@@ -103,9 +104,9 @@ pids+=("$!")
 # ---- 3. Flask HTTP API（监听 0.0.0.0:11008，gunicorn 生产模式）-------------
 # 用 gunicorn 替代 Flask 内置开发服务器（flask_app.run()）：生产级 WSGI
 # 服务器，支持多 worker/线程并发、超时保护、优雅关闭与结构化访问日志。
-# 该 API 层负载轻（提交/查询/下载，翻译在 Celery worker 中执行），
-# 默认 2 worker × 8 线程，可用 FLASK_WORKERS / FLASK_THREADS 调整；
-# --timeout 120 避免下载大 PDF 时 worker 被误杀。
+# 该 API 层负载轻（提交/查询/下载，翻译与 docx 生成都在 Celery worker
+# 中完成），默认 2 worker × 8 线程，可用 FLASK_WORKERS / FLASK_THREADS
+# 调整；--timeout 120 避免下载大文件时 worker 被误杀。
 echo "[entrypoint] Starting Flask HTTP API on 0.0.0.0:11008 (gunicorn, workers=${FLASK_WORKERS:-2}, threads=${FLASK_THREADS:-8})"
 gunicorn \
     --chdir /opt \

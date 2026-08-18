@@ -2,12 +2,18 @@ from flask import Flask, request, send_file
 from celery import Celery, Task
 from celery.result import AsyncResult
 from pdf2zh import translate_stream
+from pdf2zh.docx_output import convert_pdf_to_docx
 import tqdm
 import json
 import io
+import logging
 from string import Template
 from pdf2zh.doclayout import ModelInstance
 from pdf2zh.config import ConfigManager
+
+DOCX_MIMETYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+logger = logging.getLogger(__name__)
 
 flask_app = Flask("pdf2zh")
 flask_app.config.from_mapping(
@@ -55,7 +61,19 @@ def translate_task(
         model=ModelInstance.value,
         **args,
     )
-    return doc_mono, doc_dual
+    # 与 PDF 翻译结果同步生成 docx 版本（一 PDF 页一 Word 页），
+    # 下载接口直接交付 docx；docx 生成失败时返回 None，不阻断翻译任务
+    docx_mono = _try_to_docx(doc_mono, "mono")
+    docx_dual = _try_to_docx(doc_dual, "dual")
+    return doc_mono, doc_dual, docx_mono, docx_dual
+
+
+def _try_to_docx(pdf_bytes: bytes, label: str):
+    try:
+        return convert_pdf_to_docx(pdf_bytes)
+    except Exception:
+        logger.exception(f"[{label}] docx generation failed, will serve PDF instead")
+        return None
 
 
 @flask_app.route("/v1/translate", methods=["POST"])
@@ -91,9 +109,31 @@ def get_translate_result(id: str, format: str):
         return {"error": "task not finished"}, 400
     if not result.successful():
         return {"error": "task failed"}, 400
-    doc_mono, doc_dual = result.get()
+    # 结果：mono/dual 的 PDF 字节 + 同步生成的 docx 字节（docx 可能为 None）
+    task_result = result.get()
+    if len(task_result) == 4:
+        doc_mono, doc_dual, docx_mono, docx_dual = task_result
+    else:
+        # 兼容旧版本 worker 遗留的 2 元组结果
+        doc_mono, doc_dual = task_result
+        docx_mono = docx_dual = None
+
+    to_send_docx = docx_mono if format == "mono" else docx_dual
+    if to_send_docx is not None:
+        return send_file(
+            io.BytesIO(to_send_docx),
+            mimetype=DOCX_MIMETYPE,
+            as_attachment=True,
+            download_name=f"{id}-{format}.docx",
+        )
+    # 降级：docx 生成失败时回退交付 PDF
     to_send = doc_mono if format == "mono" else doc_dual
-    return send_file(io.BytesIO(to_send), "application/pdf")
+    return send_file(
+        io.BytesIO(to_send),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=f"{id}-{format}.pdf",
+    )
 
 
 if __name__ == "__main__":
