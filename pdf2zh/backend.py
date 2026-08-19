@@ -102,8 +102,15 @@ def delete_translate_task(id: str):
     return {"state": str(result.state)}
 
 
-@flask_app.route("/v1/translate/<id>/<format>")
-def get_translate_result(id: str, format: str):
+@flask_app.route("/v1/translate/<id>/<format>/<filetype>")
+def get_translate_result(id: str, format: str, filetype: str):
+    """下载翻译结果：<format> = mono(单语) / dual(原文译文对照)，
+    <filetype> = pdf(译文 PDF) / docx(Word 文档)。"""
+    if format not in ("mono", "dual"):
+        return {"error": "unknown format"}, 404
+    if filetype not in ("pdf", "docx"):
+        return {"error": "unknown file type"}, 404
+
     result = celery_app.AsyncResult(id)
     if not result.ready():
         return {"error": "task not finished"}, 400
@@ -118,18 +125,28 @@ def get_translate_result(id: str, format: str):
         doc_mono, doc_dual = task_result
         docx_mono = docx_dual = None
 
-    to_send_docx = docx_mono if format == "mono" else docx_dual
-    if to_send_docx is not None:
+    doc_pdf = doc_mono if format == "mono" else doc_dual
+    doc_docx = docx_mono if format == "mono" else docx_dual
+
+    if filetype == "pdf":
+        # 译文 PDF（mono）或原文译文对照 PDF（dual）
         return send_file(
-            io.BytesIO(to_send_docx),
+            io.BytesIO(doc_pdf),
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=f"{id}-{format}.pdf",
+        )
+    # filetype == "docx"：worker 同步生成的 Word 文档
+    if doc_docx is not None:
+        return send_file(
+            io.BytesIO(doc_docx),
             mimetype=DOCX_MIMETYPE,
             as_attachment=True,
             download_name=f"{id}-{format}.docx",
         )
     # 降级：docx 生成失败时回退交付 PDF
-    to_send = doc_mono if format == "mono" else doc_dual
     return send_file(
-        io.BytesIO(to_send),
+        io.BytesIO(doc_pdf),
         mimetype="application/pdf",
         as_attachment=True,
         download_name=f"{id}-{format}.pdf",

@@ -1,8 +1,12 @@
 # ============================================================================
 # PDFMathTranslate (pdf2zh) — PDF 翻译 HTTP API 后端服务镜像
 #
-# 版本：1.5.0
+# 版本：1.6.0
 # 变更：
+#   1.6.0  下载接口按格式拆分为子路径：新增 mono/pdf、dual/pdf 交付
+#         译文 PDF / 原文译文对照 PDF；原 /mono、/dual 路径改为
+#         /mono/docx、/dual/docx 交付 Word 文档（docx 生成失败时回退
+#         返回 PDF）
 #   1.5.0  docx 生成改为与翻译同步：worker 在产出 PDF 翻译结果的同时用
 #         pdf2docx（PyMuPDF 提取版式 + python-docx 生成，一 PDF 页一 Word
 #         节）直接生成 docx 翻译结果并随任务结果返回，下载接口直接交付
@@ -44,17 +48,19 @@
 # OpenAI 兼容接口（见 README.md）。
 #
 # 构建（注意：构建上下文必须是仓库根目录，构建机需能访问外网下载资源）：
-#   docker build -f pdf-translate-service/Dockerfile -t pdf2zh-api:1.5.0 .
-#   docker tag pdf2zh-api:1.5.0 pdf2zh-api:latest
+#   docker build -f pdf-translate-service/Dockerfile -t pdf2zh-api:1.6.0 .
+#   docker tag pdf2zh-api:1.6.0 pdf2zh-api:latest
 #
 # 运行：
-#   docker run -p 11008:11008 pdf2zh-api:1.5.0
+#   docker run -p 11008:11008 pdf2zh-api:1.6.0
 #
 # 常用接口（详见 docs/APIS.md#api-http）：
 #   POST   /v1/translate                         提交翻译任务
 #   GET    /v1/translate/<task-id>               查询进度
-#   GET    /v1/translate/<task-id>/mono          下载单语 DOCX
-#   GET    /v1/translate/<task-id>/dual          下载双语 DOCX
+#   GET    /v1/translate/<task-id>/mono/pdf      下载单语译文 PDF
+#   GET    /v1/translate/<task-id>/dual/pdf      下载原文译文对照 PDF
+#   GET    /v1/translate/<task-id>/mono/docx     下载单语 Word 文档
+#   GET    /v1/translate/<task-id>/dual/docx     下载原文译文对照 Word 文档
 #   DELETE /v1/translate/<task-id>               中断并删除任务
 # ============================================================================
 
@@ -67,7 +73,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 LABEL org.opencontainers.image.title="pdf2zh-api" \
       org.opencontainers.image.description="PDF translation HTTP API service (PDFMathTranslate)" \
-      org.opencontainers.image.version="1.5.0"
+      org.opencontainers.image.version="1.6.0"
 
 # 系统依赖：
 #   - libgl1 / libglib2.0-0 / libxext6 / libsm6 / libxrender1
